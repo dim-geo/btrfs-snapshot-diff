@@ -32,6 +32,13 @@ The actual disk size of Snapshot 2 is the size of the extents of snapshot 2 minu
 
 ## Usage:
 
+[python-btrfs](https://github.com/knorrie/python-btrfs) must installed.
+
+`subvolume.py /path/to/btrfs <subvolume id to ignore1> <subvolume id to ignore2> ...`
+
+You can find suvolume ids by using:
+`btrfs subvolume list /path/to/btrfs`
+
 ## Possible expansions:
 
 ## Open questions:
