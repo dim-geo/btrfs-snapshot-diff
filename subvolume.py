@@ -19,7 +19,51 @@
 import btrfs
 import os
 import sys
-from collections import OrderedDict
+
+def sizeof_fmt(num, suffix='B'):
+    for unit in ['','Ki','Mi','Gi','Ti','Pi','Ei','Zi']:
+        if abs(num) < 1024.0:
+            return "%3.1f%s%s" % (num, unit, suffix)
+        num /= 1024.0
+    return "%.1f%s%s" % (num, 'Yi', suffix)
+
+
+class Snapshot:
+    def __init__(self, objectid):
+        self._objectid = objectid
+        self._blocks=set()
+
+    @property
+    def objectid(self):
+        return self._objectid
+    
+    @property
+    def blocks(self):
+        return self._blocks
+
+    def add(self,objectid,offset,size):
+        pair=(objectid,offset,size)
+        self._blocks.add(pair)
+
+    def _setblocks(self,data):
+        self._blocks=data
+
+    def __sub__(self,other):
+        leftover_blocks=self.blocks-other.blocks
+        newsnapshot=Snapshot(self.objectid)
+        newsnapshot._setblocks(leftover_blocks)
+        return newsnapshot
+    
+    @property
+    def size(self):
+        sum=0
+        for extent in self.blocks:
+            sum+=extent[2]
+        return sum
+    
+    def __str__(self):
+        return '{:>10} {:>8}'.format(self.objectid,sizeof_fmt(self.size))
+        
 
 #path of btrfs filesystem
 path = sys.argv[1]
@@ -29,66 +73,54 @@ path = sys.argv[1]
 ignored_trees=set()
 
 for item in sys.argv[2:]:
-	ignored_trees.add(int(item))
+  ignored_trees.add(int(item))
 
 fs = btrfs.FileSystem(path)
-subvolume_extent_dictionary=OrderedDict()
+subvolume_list=[]
 
 #iterate all subvolumes
 
 for subvol in fs.subvolumes():
-	tree = subvol.key.objectid
-	if tree in ignored_trees:
-		continue
-	#print(subvol)
-	#print(tree)
-	extent_set=set()
-	#search in this subvolume all file extents
-	for header, data in btrfs.ioctl.search_v2(fs.fd, tree):
-		if header.type == btrfs.ctree.EXTENT_DATA_KEY:
-			datum=btrfs.ctree.FileExtentItem(header,data)
-			#print(datum)
-			#ignore inline file extents, they are small
-			if datum.type != btrfs.ctree.FILE_EXTENT_INLINE:
-				pair=(header.objectid,datum.logical_offset,datum.disk_num_bytes)
-				#print(pair)
-				#print(datum)
-				extent_set.add(pair)
-	#print(extent_set)
-	subvolume_extent_dictionary[tree]=extent_set
-
-#print(subvolume_extent_dictionary)
+  tree = subvol.key.objectid
+  if tree in ignored_trees:
+    continue
+  snapshot=Snapshot(tree)
+  #search in this subvolume all file extents
+  for header, data in btrfs.ioctl.search_v2(fs.fd, tree):
+    if header.type == btrfs.ctree.EXTENT_DATA_KEY:
+      datum=btrfs.ctree.FileExtentItem(header,data)
+      #print(datum)
+      #ignore inline file extents, they are small
+      if datum.type != btrfs.ctree.FILE_EXTENT_INLINE:
+        snapshot.add(header.objectid,datum.logical_offset,datum.disk_num_bytes)
+  subvolume_list.append(snapshot)
 
 #make sure that subvolume order is from newest (current) to oldest
 
-trees=list(subvolume_extent_dictionary.keys())
-current_tree=trees[0]
-del trees[0]
-trees.append(current_tree)
-trees.reverse()
-#print(trees)
-#sys.exit(0)
+current_subvolume=subvolume_list[0]
+del subvolume_list[0]
+subvolume_list.append(current_subvolume)
+subvolume_list.reverse()
 
 #parse list of subvolumes and calculate the number of the unique file extents in this subvolume
-subvolume_extent_dictionary_sizes=OrderedDict()
-for index,snapshot in enumerate(trees):
-	previous_snapshot = trees[index-1]
-	if index==0:
-		previous_snapshot = None
-	try:
-		next_snapshot = trees[index+1]
-	except:
-		next_snapshot = None
-	#print(index,snapshot,previous_snapshot,next_snapshot)
-	if previous_snapshot != None and next_snapshot != None :
-		subvolume_extent_dictionary_sizes[snapshot]= subvolume_extent_dictionary[snapshot] - subvolume_extent_dictionary[previous_snapshot] - subvolume_extent_dictionary[next_snapshot]
-		#subvolume_extent_dictionary_sizes[snapshot].union(subvolume_extent_dictionary[snapshot] - subvolume_extent_dictionary[next_snapshot])
-	elif previous_snapshot == None:
-		subvolume_extent_dictionary_sizes[snapshot]=subvolume_extent_dictionary[snapshot] - subvolume_extent_dictionary[next_snapshot]
-	else:
-		subvolume_extent_dictionary_sizes[snapshot]= subvolume_extent_dictionary[snapshot] - subvolume_extent_dictionary[previous_snapshot]
-	#calculate the sum of unique file extents for each subvolume
-	sum=0
-	for extent in subvolume_extent_dictionary_sizes[snapshot]:
-		sum+=extent[2]
-	print(snapshot,sum,len(subvolume_extent_dictionary_sizes[snapshot]))
+#calculate also how much data were changed, compared to the older subvolume
+
+#next_snapshot is actually the older snapshot
+for index,snapshot in enumerate(subvolume_list):
+  previous_snapshot = subvolume_list[index-1]
+  if index==0:
+    previous_snapshot = None
+  try:
+    next_snapshot = subvolume_list[index+1]
+  except:
+    next_snapshot = None
+  #print(index,snapshot,previous_snapshot,next_snapshot)
+  if previous_snapshot != None and next_snapshot != None :
+    diff_snapshot=snapshot - next_snapshot
+    unique_snapshot=diff_snapshot-previous_snapshot
+  elif previous_snapshot == None:
+    diff_snapshot = unique_snapshot = snapshot - next_snapshot
+  else:
+    diff_snapshot=snapshot
+    unique_snapshot=diff_snapshot-previous_snapshot
+  print(unique_snapshot,diff_snapshot)
