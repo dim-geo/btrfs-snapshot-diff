@@ -19,6 +19,7 @@
 import btrfs
 import os
 import sys
+import multiprocessing
 
 def sizeof_fmt(num, suffix='B'):
     for unit in ['','Ki','Mi','Gi','Ti','Pi','Ei','Zi']:
@@ -65,62 +66,75 @@ class Snapshot:
         return '{:>10} {:>8}'.format(self.objectid,sizeof_fmt(self.size))
         
 
-#path of btrfs filesystem
-path = sys.argv[1]
-
-
-#list of ingored subvolumes
-ignored_trees=set()
-
-for item in sys.argv[2:]:
-  ignored_trees.add(int(item))
-
-fs = btrfs.FileSystem(path)
-subvolume_list=[]
-
-#iterate all subvolumes
-
-for subvol in fs.subvolumes():
-  tree = subvol.key.objectid
-  if tree in ignored_trees:
-    continue
+def find_extents(pair):
+  fd,tree = pair
   snapshot=Snapshot(tree)
   #search in this subvolume all file extents
-  for header, data in btrfs.ioctl.search_v2(fs.fd, tree):
+  for header, data in btrfs.ioctl.search_v2(fd, tree):
     if header.type == btrfs.ctree.EXTENT_DATA_KEY:
       datum=btrfs.ctree.FileExtentItem(header,data)
       #print(datum)
       #ignore inline file extents, they are small
       if datum.type != btrfs.ctree.FILE_EXTENT_INLINE:
         snapshot.add(header.objectid,datum.logical_offset,datum.disk_num_bytes)
-  subvolume_list.append(snapshot)
+  return snapshot
 
-#make sure that subvolume order is from newest (current) to oldest
 
-current_subvolume=subvolume_list[0]
-del subvolume_list[0]
-subvolume_list.append(current_subvolume)
-subvolume_list.reverse()
+if __name__ == "__main__":
+    #path of btrfs filesystem
+    path = sys.argv[1]
+    
+    #list of ingored subvolumes
+    ignored_trees=set()
 
-#parse list of subvolumes and calculate the number of the unique file extents in this subvolume
-#calculate also how much data were changed, compared to the older subvolume
+    for item in sys.argv[2:]:
+        ignored_trees.add(int(item))
 
-#next_snapshot is actually the older snapshot
-for index,snapshot in enumerate(subvolume_list):
-  previous_snapshot = subvolume_list[index-1]
-  if index==0:
-    previous_snapshot = None
-  try:
-    next_snapshot = subvolume_list[index+1]
-  except:
-    next_snapshot = None
-  #print(index,snapshot,previous_snapshot,next_snapshot)
-  if previous_snapshot != None and next_snapshot != None :
-    diff_snapshot=snapshot - next_snapshot
-    unique_snapshot=diff_snapshot-previous_snapshot
-  elif previous_snapshot == None:
-    diff_snapshot = unique_snapshot = snapshot - next_snapshot
-  else:
-    diff_snapshot=snapshot
-    unique_snapshot=diff_snapshot-previous_snapshot
-  print(unique_snapshot,diff_snapshot)
+    fs = btrfs.FileSystem(path)
+    subvolume_list=[]
+
+    #iterate all subvolumes
+    arguments=[]
+    for subvol in fs.subvolumes():
+        tree = subvol.key.objectid
+        if tree not in ignored_trees:
+            arguments.append((fs.fd,tree))
+    with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
+        subvolume_list=pool.map(find_extents,arguments)
+
+    #make sure that subvolume order is from newest (current) to oldest
+
+    current_subvolume=subvolume_list[0]
+    del subvolume_list[0]
+    subvolume_list.append(current_subvolume)
+    subvolume_list.reverse()
+
+    #parse list of subvolumes and calculate the number of the unique file extents in this subvolume
+    #calculate also how much data were changed, compared to the older subvolume
+    print("Unique File Extents Extents added ontop Extents added    ontop")
+    print("per       subvolume of older  subvolume of current(act) subvolume")
+    print("-------------------|-------------------|----------------------")
+    print("SubvolumId     Size SubvolumId     Size SubvolumId     Size")
+    #next_snapshot is actually the older snapshot
+    for index,snapshot in enumerate(subvolume_list):
+        previous_snapshot = subvolume_list[index-1]
+        if index==0:
+            previous_snapshot = None
+            current_snashot=snapshot
+        try:
+            next_snapshot = subvolume_list[index+1]
+        except:
+            next_snapshot = None
+        #print(index,snapshot,previous_snapshot,next_snapshot)
+        if previous_snapshot != None and next_snapshot != None :
+            diff_older_snapshot=snapshot - next_snapshot
+            unique_snapshot=diff_older_snapshot-previous_snapshot
+            diff_newer_snapshot=snapshot-current_snashot
+        elif previous_snapshot == None:
+            diff_older_snapshot = unique_snapshot = snapshot - next_snapshot
+            diff_newer_snapshot=snapshot
+        else:
+            diff_older_snapshot=snapshot
+            diff_newer_snapshot=snapshot-current_snashot
+            unique_snapshot=diff_older_snapshot-previous_snapshot
+        print(unique_snapshot,diff_older_snapshot,diff_newer_snapshot)
