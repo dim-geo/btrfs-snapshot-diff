@@ -19,8 +19,8 @@ Thus, we create a tree of extents & ranges together with the snapshots that use 
    2. range2: [Snapshot 3]
    3. ...
 2. file extent 2
-   3. range1: [...]
-   4. range2: [...]
+   1. range1: [...]
+   2. range2: [...]
 
 Now, the actual disk size of Snapshot 1 can be extracted from each file extent
 ## Usage:
