@@ -15,239 +15,158 @@
 #   You should have received a copy of the GNU General Public License
 #   along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-
 import btrfs
-import os
-import sys
-import multiprocessing
-import copy
-import bisect
-import lzma
-import pickle
 import argparse
-import time
+import sys
+from collections import deque
+from collections import Counter
 
-#function to calculate the difference between 2 ranges
+#Class to hold data. It's a dictionary of dictionaries.
+#tree[key of the extent]= {range1: [snapshots],range2: [snapshots]}
 
-def range_sub(range1,range2):
-    result=[]
-    a,b=range1
-    x,y=range2
-    if x>b or y<a:
-        result.append(range1)
-        return result
-    if y>=b:
-        if x>a:
-            b=x-1
-        else:
-            return result
-    else:
-        if x>a:
-            result.append((a,x-1))
-        a=y+1
-    result.append((a,b))
-    return result
-
-#helper function for subtraction parallelism
-
-def subtract(pair):
-    a,b=pair
-    if b != None:
-        a-=b
-    return a
-
-def subtract_new_obj(pair):
-    a,b=pair
-    x=a-b
-    return x
-
-
-#Normal File extent class
-#Data Address + a list of ranges
-
-class MyFileExtent:
-    def __init__(self,address1,address2,start,size):
-        self._address=(address1,address2)
-        if size>0:
-            self._ranges=[(start,start+size-1)]
-        else:
-            self._ranges=[]
-        #self._start=start
-        #self._size=size
-
-    #Calculate difference between extents.
-    #Extents with the same address require special manipulation
-    #in reality we need to perform range operations
-
-    def __sub__(self,other):
-        if self._address != other._address:
-            return copy.deepcopy(self)
-        else:            
-            new = copy.deepcopy(self)
-            i=0
-            j=0 # j=bisect.bisect_left(other._ranges,new_ranges[0])
-            while(i<len(new._ranges) and j < len(other._ranges)):
-                myrange=new._ranges[i]
-                rang=other._ranges[j]
-                results=range_sub(myrange,rang)
-                if len(results) == 0:
-                    del new._ranges[i]
-                if len(results) >0 and results[0] != myrange:
-                    del new._ranges[i]
-                    k=i
-                    for result in results:
-                        new._ranges.insert(k,result)
-                        k+=1
-                #print(i,j,len(new._ranges),len(other._ranges[j]))
-                #print(new._ranges[i],other._ranges[j])
-                if i>=len(new._ranges):
-                    break
-                k=i
-                l=j
-                if new._ranges[k][1]< other._ranges[l][1]:
-                    i+=1
-                if new._ranges[k][0]>other._ranges[l][1]:
-                    j+=1
-            return new
-
-
-    #both of these are not accurate when both extents have the same address!
-    def __lt__(self,other):
-        if self._address < other._address:
-            return True
-        else:
-            return False
-
-    def __le__(self,other):
-        if self._address <= other._address:
-            return True
-        else:
-            return False
+class TreeWrapper:
+    def __init__(self):
+        self._tree=dict()
+        self._snapshots=[]
     
-    #check if two extents have the same address, used in subtraction and merging
-    def same_address(self,other):
-        if self._address != other._address:
-            return False
-        else:
-            return True
-    
-    #merge 2 extents if they have the same address. In reality mergesort would be
-    #better, however the other extent is always one range
-    def merge(self,other):
-        if self._address == other._address:
-            for item in other._ranges:
-                bisect.insort(self._ranges,item)
-        return self
+    #unfortunately some extents reappear, maybe there are dedup or reflink?
+    #right know they are completely ignored
+    def add(self,tree,key,start,stop):
+                  if key in self._tree.keys():
+                      #data_tree[key].update([datum.offset,stop])
+                      add=True
+                      ranges=sorted(self._tree[key].keys())
+                      for limit in ranges:
+                          if limit > stop:
+                              break
+                          snapshots=self._tree[key][limit]
+                          if limit == start or limit == stop:
+                              if tree in snapshots:
+                                  add=False
+                                  #print(tree,key,start,stop)
+                                  #print(sorted(self._tree[key].items()))
+                                  break
+                      if add:
+                          if start in self._tree[key].keys():
+                              self._tree[key][start].append(tree)
+                          else:
+                              self._tree[key][start]=[tree]
+                          if stop in self._tree[key].keys():
+                              self._tree[key][stop].append(tree)
+                          else:
+                              self._tree[key][stop]=[tree]
+                  else:
+                      #data_tree[key]=sortedcontainers.SortedSet([datum.offset,stop])
+                      #self._tree[key]=sortedcontainers.SortedDict()
+                      self._tree[key]=dict()
+                      self._tree[key][start]=[tree]
+                      self._tree[key][stop]=[tree]
 
-    #calculate the byte size of the extent
-    def __len__(self):
-        size=0
-        for rang in self._ranges:
-            start,stop=rang
-            size+=(stop-start+1)
-        return size
-    
-    #convert to string, show all data
-    def __str__(self):
-        return "{} {}".format(self._address,self._ranges)
-
-#class to represent subvolume/snapshot. It has a unique id and a list of extents
-class Snapshot:
-    def __init__(self, objectid):
-        self._objectid = objectid
-        #self._blocks=SortedList()
-        self._blocks=[]
-        self._dummyi=0
-        #self._fileextents=[]
-    
-    #add an extent in this snapshot, how it can be made faster?
-    #we want the extents sorted & merged
-    def add(self,offset1,offset2,offset3,size):
-        newextent=MyFileExtent(offset1,offset2,offset3,size)
-        #implement insertsort and merging
-        i=bisect.bisect_left(self._blocks,newextent)
-        if i< len(self._blocks) and newextent.same_address(self._blocks[i]):
-            self._blocks[i].merge(newextent)
-        else:
-            self._blocks.insert(i,newextent)
-    
-    #make an iterator to facilitate subtraction
-    #each tuple contains an extent with the same address extent of other
-    #if it does not exist, put none
-    def _sub_list_generator(self,other):
-        i=j=0
-        while(i<len(self._blocks)):
-            #print(i,j)
-            if j==len(other._blocks) or self._blocks[i]< other._blocks[j]:
-                yield((copy.deepcopy(self._blocks[i]),None))
-                i+=1
-            elif self._blocks[i].same_address(other._blocks[j]):
-                yield((copy.deepcopy(self._blocks[i]),other._blocks[j]))
-                i+=1
-                j+=1
-            else:
-                j+=1
-    
-    #Parallelize subtraction of snapshots
-    def __oldsub__(self,other):
-        newsnapshot=Snapshot(self._objectid)
-        chunk=len(self._blocks)//multiprocessing.cpu_count()
-        with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
-            extentgenerator=pool.imap(subtract,self._sub_list_generator(other),chunk)
-            for extent in extentgenerator:
-                newsnapshot._blocks.append(extent)
-        return newsnapshot
-
-
-    #serial subtraction of snapshots
-    def __sub__(self,other):
-        newsnapshot=Snapshot(self._objectid)
+    #each range marker should have only the snapshots that cover the upcoming range
+    def transform(self):
+        list_of_extents=sorted(self._tree.keys())
         i=0
-        for extent in self._blocks:
-            newextent=copy.deepcopy(extent)
-            while(i < len(other._blocks) and other._blocks[i]<=extent):
-                if newextent.same_address(other._blocks[i]):
-                    newextent-=other._blocks[i]
-                i+=1
-            if len(newextent)!=0:
-                newsnapshot._blocks.append(newextent)
-        return newsnapshot
+        while i < len(list_of_extents):
+            extent=list_of_extents[i]
+            rangedict=self._tree[extent]
+            #iterableview = rangedict.items()
+            list_of_ranges=sorted(rangedict.keys())
+            for j,myrange in enumerate(list_of_ranges):
+                if j ==0:
+                    continue
+                #myrange,myset=mytuple
+                myset=set(rangedict[myrange])
+                result = set(rangedict[list_of_ranges[j-1]])^myset
+                rangedict[myrange]=list(result)
+            self._tree[extent]=rangedict
+            i+=1
 
+    #return the sum of all data. It should be almost the same as the real data
+    #used by the filesystem excluding metadata
     def __len__(self):
-        size=0
-        for extent in self._blocks:
-            #print(extent)
-            size+=len(extent)
-        return size
+        result=0
+        for extent,rangedict in self._tree.items():
+            iterableview = sorted(rangedict.items())
+            for i,mytuple in enumerate(iterableview):
+                myrange,myset=mytuple
+                #myset=list(myset)
+                if len(myset)>=1:
+                    try:
+                        size=iterableview[i+1][0]-myrange
+                        result+=size
+                    except:
+                        print(extent,sorted(rangedict.items()),mytuple)
+        return result
 
-    def __str__(self):
-        return '{:>10} {:>10}'.format(self._objectid,btrfs.utils.pretty_size(len(self)))
+    #find those ranges that have only one snapshot, if this snapshot is deleted
+    #this space will be freed
+    def find_unique(self):
+        result=Counter()
+        for extent,rangedict in self._tree.items():
+            iterableview = sorted(rangedict.items())
+            for i,mytuple in enumerate(iterableview):
+                myrange,myset=mytuple
+                #myset=list(myset)
+                if len(myset)==1:
+                    try:
+                        size=iterableview[i+1][0]-myrange
+                        result[myset[0]]+=size
+                    except:
+                        print(extent,rangedict,mytuple)
+        return result
+    
+    #helper function to find the size of the ranges that have the desired snapshots
+    def find_snapshots_size(self,wanted,not_wanted):
+        result=0
+        for extent,rangedict in self._tree.items():
+            rangelist = sorted(rangedict.keys())
+            for i,myrange in enumerate(rangelist):
+                snapshots=set(rangedict[myrange])
+                if len(set(wanted) & snapshots)>0 and len(set(not_wanted) & snapshots) ==0:
+                    try:
+                        result+=rangelist[i+1]-myrange
+                    except:
+                        print(wanted,not_wanted)
+                        print(extent,sorted(rangedict.items()),myrange)
+        return result
+    
+    def add_snapshots(self,snapshots):
+        self._snapshots=snapshots.copy()
+    
+    #calculate the size of ranges ontop of the previous subvolume
+    def find_snapshot_size_to_previous(self):
+        results=Counter()
+        for i, snapshot in enumerate(self._snapshots):
+                if i>0:
+                    results[snapshot]+=self.find_snapshots_size([snapshot],[self._snapshots[i-1]])
+                else:
+                    results[snapshot]+=self.find_snapshots_size([snapshot],[])
+        return results
 
-#helper function to create snapshots in parallel
-#compress snapshots as they can take huge amounts of ram
-def find_extents(pair):
-  fs,tree = pair
-  snapshot=Snapshot(tree)
-  #print("Start",tree)
-  #search in this subvolume all file extents
-  for header, data in btrfs.ioctl.search_v2(fs.fd, tree):
-    if header.type == btrfs.ctree.EXTENT_DATA_KEY:
-      datum=btrfs.ctree.FileExtentItem(header,data)
-      #print(datum)
-      #ignore inline file extents, they are small
-      #btrfs.utils.pretty_print(datum)
-      if datum.type != btrfs.ctree.FILE_EXTENT_INLINE and datum.disk_bytenr !=0:
-        snapshot.add(datum.disk_bytenr,datum.disk_num_bytes,datum.offset,datum.num_bytes)
-  #snapshot.compact()
-  #print("Compress",tree)
-  compressed_snapshot=lzma.compress(pickle.dumps(snapshot))
-  #print("Done",tree)
-  #return snapshot
-  return compressed_snapshot
+    #calculate the size of ranges ontop of the current active subvolume
+    def find_snapshot_size_to_current(self):
+        results=Counter()
+        current=self._snapshots[-1]
+        for snapshot in self._snapshots:
+                if snapshot == current:
+                    results[snapshot]+=self.find_snapshots_size([snapshot],[])
+                else:
+                    results[snapshot]+=self.find_snapshots_size([snapshot],[current])
+        return results
 
 
-if __name__ == "__main__":
+def disk_parse(data_tree,fs,tree):
+          print(tree)
+          for header, data in btrfs.ioctl.search_v2(fs.fd, tree):
+            if header.type == btrfs.ctree.EXTENT_DATA_KEY:
+              datum=btrfs.ctree.FileExtentItem(header,data)
+              if datum.type != btrfs.ctree.FILE_EXTENT_INLINE:# and datum.disk_bytenr !=0:
+                  key=(datum.disk_bytenr,datum.disk_num_bytes)
+                  stop=datum.offset+datum.num_bytes
+                  data_tree.add(tree,key,datum.offset,stop)
 
+
+def main(): 
     parser = argparse.ArgumentParser()
     parser.add_argument("path", type=str,
                     help="path of the btrfs filesystem")
@@ -258,68 +177,40 @@ if __name__ == "__main__":
     #list of ignored subvolumes
     ignored_trees=set(args.subs)
     ignored_trees.add(args.root)
-
     fs = btrfs.FileSystem(args.path)
-    subvolume_list=[]
-    #iterate all subvolumes
-    arguments=[]
+    
+    #data_tree=sortedcontainers.SortedDict()
+    #data_tree=dict()
+    data_tree=TreeWrapper()
+    #data_tree=TreeWrapperSql()
+    #data_tree=TreeWrapperCompress()
+    snapshots=[]
+
+    disk_parse(data_tree,fs,args.root)
+    snapshots.append(args.root)
+    
     for subvol in fs.subvolumes():
         tree = subvol.key.objectid
         if tree not in ignored_trees:
-            arguments.append((fs,tree))
-    arguments.append((fs,args.root))
-    
-    chunk=len(arguments)//multiprocessing.cpu_count()
-    with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
-        subvolume_list=pool.map(find_extents,arguments,chunk)
-
-    #make sure that subvolume order is from newest (current) to oldest
-
-    subvolume_list.reverse()
-    
-    #parse list of subvolumes and calculate the number of the unique file extents in this subvolume
-    #calculate also how much data were changed, compared to the older subvolume
+          disk_parse(data_tree,fs,tree)
+          snapshots.append(tree)
+    changed_snapshots = deque(snapshots)
+    changed_snapshots.rotate(-1)
+    data_tree.add_snapshots(list(changed_snapshots))
+    data_tree.transform()
+    unique_sum=0
+    unique_data=data_tree.find_unique()
+    current_data=data_tree.find_snapshot_size_to_current()
+    previous_data=data_tree.find_snapshot_size_to_previous()
     print(" Unique File Extents  Extents added ontop   Extents added ontop of")
     print(" per       subvolume  of previous subvolume current(act) subvolume")
-    print("---------------------|---------------------|------------------------")
-    print("SubvolumId       Size SubvolumId       Size SubvolumId       Size")
-    #next_snapshot is actually the older snapshot
-    size=0
-    snappy=current_snashot=pickle.loads(lzma.decompress(subvolume_list[0]))
-    first_size=len(current_snashot)
-    #old_snap=None
-    i=0
-    while i< len(subvolume_list):
-        #snappy=pickle.loads(lzma.decompress(snapshot))
-        #start = time.time()
-        if i==0:
-            previous_snapshot = None
-        try:
-            next_snapshot = pickle.loads(lzma.decompress(subvolume_list[i+1]))
-        except:
-            next_snapshot = None
-        #print(index,snapshot,previous_snapshot,next_snapshot)
-        if previous_snapshot != None and next_snapshot != None :
-            #diff_older_snapshot=snappy - next_snapshot
-            #diff_newer_snapshot=snappy - current_snashot
-            arguments=[(snappy,next_snapshot),(snappy,current_snashot)]
-            with multiprocessing.Pool(processes=2) as pool:
-                diff_older_snapshot,diff_newer_snapshot=pool.map(subtract,arguments)
-            unique_snapshot=diff_older_snapshot-previous_snapshot
-        elif previous_snapshot == None:
-            diff_older_snapshot = unique_snapshot = snappy - next_snapshot
-            diff_newer_snapshot=snappy
-        else:
-            diff_older_snapshot=snappy
-            arguments=[(snappy,current_snashot),(snappy,previous_snapshot)]
-            with multiprocessing.Pool(processes=2) as pool:
-                diff_newer_snapshot,unique_snapshot=pool.map(subtract,arguments)
-            #diff_newer_snapshot=snappy-current_snashot
-            #unique_snapshot=snappy-previous_snapshot
-        #print(f"{i} took {time.time() - start:.2f} seconds")
-        size+=len(unique_snapshot)
-        print(unique_snapshot,diff_older_snapshot,diff_newer_snapshot)
-        previous_snapshot=snappy
-        snappy=next_snapshot
-        i+=1
-    print("Size/Cost of snapshots:",btrfs.utils.pretty_size(size),"Volatility:","{:.2%}".format(size/first_size))
+    print("---------------------|---------------------|----------------------")
+    print("SubvolumId       Size                  Size                   Size")
+    for snapshot in reversed(changed_snapshots):
+        print("{:>10} {:>10}            {:>10}             {:>10}".format(snapshot,btrfs.utils.pretty_size(unique_data[snapshot]),btrfs.utils.pretty_size(previous_data[snapshot]),btrfs.utils.pretty_size(current_data[snapshot])))
+        unique_sum+=unique_data[snapshot]
+    print("Size/Cost of snapshots:",btrfs.utils.pretty_size(unique_sum),"Volatility:","{:.2%}".format(unique_sum/len(data_tree)))
+
+
+if __name__ == '__main__':
+    main()
