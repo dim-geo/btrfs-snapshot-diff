@@ -156,7 +156,7 @@ class TreeWrapper:
 
 
 def disk_parse(data_tree,fs,tree):
-          print(tree)
+          print("Parsing subvolume:",tree)
           for header, data in btrfs.ioctl.search_v2(fs.fd, tree):
             if header.type == btrfs.ctree.EXTENT_DATA_KEY:
               datum=btrfs.ctree.FileExtentItem(header,data)
@@ -166,16 +166,18 @@ def disk_parse(data_tree,fs,tree):
                   data_tree.add(tree,key,datum.offset,stop)
 
 
-def main(): 
+def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("-u","--unique",action='store_true',help="calculate only unique data, -r makes no sense")
     parser.add_argument("path", type=str,
                     help="path of the btrfs filesystem")
     parser.add_argument("-r", "--root", type=int,default=5,
                     help="current active subvolume to analyze, default is 5")
-    parser.add_argument('subs', nargs='*', type=int, help='Ignore these subvolumes')
+    parser.add_argument('subvolume', nargs='*', type=int, help='Do not analyze these subvolumes')
     args=parser.parse_args()
+    
     #list of ignored subvolumes
-    ignored_trees=set(args.subs)
+    ignored_trees=set(args.subvolume)
     ignored_trees.add(args.root)
     fs = btrfs.FileSystem(args.path)
     
@@ -200,8 +202,12 @@ def main():
     data_tree.transform()
     unique_sum=0
     unique_data=data_tree.find_unique()
-    current_data=data_tree.find_snapshot_size_to_current()
-    previous_data=data_tree.find_snapshot_size_to_previous()
+    if args.unique:
+      current_data=Counter()
+      previous_data=Counter()
+    else:
+      current_data=data_tree.find_snapshot_size_to_current()
+      previous_data=data_tree.find_snapshot_size_to_previous()
     print(" Unique File Extents  Extents added ontop   Extents added ontop of")
     print(" per       subvolume  of previous subvolume current(act) subvolume")
     print("---------------------|---------------------|----------------------")
@@ -209,7 +215,7 @@ def main():
     for snapshot in reversed(changed_snapshots):
         print("{:>10} {:>10}            {:>10}             {:>10}".format(snapshot,btrfs.utils.pretty_size(unique_data[snapshot]),btrfs.utils.pretty_size(previous_data[snapshot]),btrfs.utils.pretty_size(current_data[snapshot])))
         unique_sum+=unique_data[snapshot]
-    print("Size/Cost of snapshots:",btrfs.utils.pretty_size(unique_sum),"Volatility:","{:.2%}".format(unique_sum/len(data_tree)))
+    print("Size/Cost of subvolumes:",btrfs.utils.pretty_size(unique_sum),"Volatility:","{:.2%}".format(unique_sum/len(data_tree)))
 
 
 if __name__ == '__main__':
