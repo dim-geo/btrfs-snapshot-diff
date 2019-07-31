@@ -27,7 +27,7 @@ Now, the actual disk size of Snapshot 1 can be extracted from each file extent
 
 [python-btrfs](https://github.com/knorrie/python-btrfs) must be installed.
 
-Program is single threaded, it could use a lot of memory and it puts a lot of read stress in disks. It could take many minutes. ionice it & monitor its memory usage. Memory usage & execution time depends on the dataset. The program does not perform any write operations. Do not modify subvolume/snapshot during execution.
+Program is single threaded, it could use a lot of memory and it puts a lot of read stress in disks. It could take many minutes. ionice it & monitor its memory usage. Memory usage & execution time depend on the dataset. The program does not perform any write operations. Do not modify subvolume/snapshot during execution.
 
 `subvolume.py [-u] [-r <root tree, default 5>] /path/to/btrfs/ [<subvolume id to ignore1> <subvolume id to ignore2>]`
 
