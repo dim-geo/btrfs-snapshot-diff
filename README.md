@@ -27,9 +27,13 @@ Now, the actual disk size of Snapshot 1 can be extracted from each file extent
 
 [python-btrfs](https://github.com/knorrie/python-btrfs) must be installed.
 
-`subvolume.py -r <root tree, default 5> /path/to/btrfs/ <subvolume id to ignore1> <subvolume id to ignore2>`
+Program is single threaded, it could use a lot of memory and it puts a lot of read stress in disks. It could take many minutes. ionice it & monitor its memory usage. Memory usage & execution time depends on the dataset. The program does not perform any write operations. Do not modify subvolume/snapshot during execution.
 
-You can find suvolume ids by using:
+`subvolume.py [-u] [-r <root tree, default 5>] /path/to/btrfs/ [<subvolume id to ignore1> <subvolume id to ignore2>]`
+
+`-u` calculates the unique data occupied by each snapshot. Thus, `-r` makes no sense. Specifying subvolumes to ignore can mess with `-u` results because the specified subvolume data will not be parsed!
+
+You can find subvolume ids by using:
 `btrfs subvolume list /path/to/btrfs`
 
 ## Example:
@@ -78,7 +82,7 @@ ID 4465 gen 15646 top level 259 path subvol_snapshots/1760/snapshot
 ID 4466 gen 15649 top level 259 path subvol_snapshots/1761/snapshot
 ```
 
-`subvolume_newway.py -r 258 /path/to/btrfs/ 259`:
+`subvolume.py -r 258 /path/to/btrfs/ 259`:
 
 ```
  Unique File Extents  Extents added ontop   Extents added ontop of
@@ -127,6 +131,7 @@ Size/Cost of snapshots: 77.78MiB Volatility: 0.01%
 ```
 Snapshot 2133 introduced 17GiB, where most of them still reside on the system (used by newer snapshot, 2395)
 Thus, deleting snapshot 2133, will only free 6MiB. Snapshot 2133 has 119MiB changed compared to current/ active (258) subvolume.
+When using `-u` argument only the first column has values.
 
 ## Possible expansions:
 
