@@ -27,11 +27,14 @@ Now, the actual disk size of Snapshot 1 can be extracted from each file extent
 
 [python-btrfs](https://github.com/knorrie/python-btrfs) must be installed.
 
-Program is single threaded, it could use a lot of memory and it puts a lot of read stress in disks. It could take many minutes. ionice it & monitor its memory usage. Memory usage & execution time depend on the dataset. The program does not perform any write operations. Do not modify subvolume/snapshot during execution.
+Program is single threaded, it could use a lot of memory and it puts a lot of read stress in disks. It could take many minutes. ionice it & monitor its memory usage. Memory usage & execution time depend on the dataset. The program does not perform any write operations. Do not modify subvolume/snapshot during execution. Try not to write any data to any subvolume or execute dedup programs in parallel.
 
-`subvolume.py [-u] [-r <root tree, default 5>] /path/to/btrfs/ [<subvolume id to ignore1> <subvolume id to ignore2>]`
+`subvolume.py [-u] [-f] [-r <root tree, default 5>] /path/to/btrfs/ [ -i | -o ] [<subvolume id1> <subvolume id2>]`
 
 `-u` calculates the unique data occupied by each snapshot. Thus, `-r` makes no sense. Specifying subvolumes to ignore can mess with `-u` results because the specified subvolume data will not be parsed!
+`-f` finds the files that might contribute to the unique extents.
+`-i` makes the program to ignore the specified subvolumes, which is also the default behaviour if no `-i` or `-o` argument is specified but subvolumes are given.
+`-o` makes the program to analyze only the specified subvolumes.
 
 You can find subvolume ids by using:
 `btrfs subvolume list /path/to/btrfs`
@@ -132,6 +135,19 @@ Size/Cost of snapshots: 77.78MiB Volatility: 0.01%
 Snapshot 2133 introduced 17GiB, where most of them still reside on the system (used by newer snapshot, 2395)
 Thus, deleting snapshot 2133, will only free 6MiB. Snapshot 2133 has 119MiB changed compared to current/ active (258) subvolume.
 When using `-u` argument only the first column has values.
+
+Files result example:
+```
+Possible Unique Files:
+beeshash.dat/ : {4652}
+beescrawl.dat/ : {4652}
+beesstats.txt/ : {4652}
+2708/filelist-2700.txt/ : {259}
+2744/filelist-2741.txt/ : {259}
+2752/filelist-2744.txt/ : {259}
+2795/filelist-2789.txt/ : {259}
+```
+
 
 ## Possible expansions:
 
