@@ -23,13 +23,15 @@ from collections import Counter
 from collections import defaultdict
 import math, array
 from functools import lru_cache
-
+import multiprocessing,os
+#from sortedcontainers import SortedList
+import bisect
 #function to convert a pair of positive integers to a single integer
 #we want to decrease memory consumption, thus we need this trick
 #http://szudzik.com/ElegantPairing.pdf
 #cache the results for speed up
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=1024)
 def unique_number(x,y):
     result=x
     if x >=y:
@@ -42,7 +44,7 @@ def unique_number(x,y):
 #undo the above function, return x,y based on a single number
 #also cache the results
 
-@lru_cache(maxsize=131072)
+@lru_cache(maxsize=1024)
 def unique_to_pair(number):
         root=int(math.floor(math.sqrt(number)))
         crit=number-root**2
@@ -64,22 +66,116 @@ def return_snapshots(mylist):
         return result
 
 #take a list of 'paired' numbers and return the paired number that has the same
-#x coordinate, which is the snapshot stored into the pair
-def return_coded(mylist,snapshot):
+#x coordinate, which is the snapshot stored into the pair. if shallow search only
+#the last element
+def return_coded(mylist,snapshot,shallow):
+    if shallow:
+        snapshot_pair,_=unique_to_pair(mylist[-1])
+        if snapshot_pair == snapshot:
+            return mylist[-1]
+        return None
     for item in mylist:
         snapshot_pair,_=unique_to_pair(item)
         if snapshot_pair == snapshot:
             return item
     return None
 
+
 #take a paired number and compare it with a snapshot
 #cache the results for speedup
-@lru_cache(maxsize=131072)
+@lru_cache(maxsize=1024)
 def compare_pair_to_snapshot(item,snapshot):
         snapshot_pair,_=unique_to_pair(item)
         if snapshot_pair == snapshot:
             return True
         return False
+
+#find an item that has the same subvolume and remove it
+def remove_snapshot_from_list(mylist,snapshot,shallow):
+    coded =return_coded(mylist,snapshot,shallow)
+    if coded != None:
+        mylist.remove(coded)
+    return mylist
+
+#find if an item with the same snapshot exists in the list
+def find_snapshot_in_list(mylist,snapshot,shallow):
+    if shallow:
+        if compare_pair_to_snapshot(mylist[-1],snapshot):
+            return True
+        else:
+            return False
+    for item in mylist:
+        if compare_pair_to_snapshot(item,snapshot):
+            return True
+    return False
+
+#function to calculate subtraction between 2 integer intervals
+def range_sub(range1,range2):
+    result=[]
+    a,b=range1
+    x,y=range2
+    if x>b or y<a:
+        result.append(range1)
+        return result
+    if y>=b:
+        if x>a:
+            b=x-1
+        else:
+            return result
+    else:
+        if x>a:
+            result.append((a,x-1))
+        a=y+1
+    result.append((a,b))
+    return result
+
+
+#Class to implement intervals, we only care about subtraction
+class Ranges:
+    def __init__(self,start=None,stop=None):
+        self.list=[]
+        self.upper=None
+        self.lower=None
+        if start!=None:
+            self.list.append((start,stop))
+            self.upper=stop
+            self.lower=start
+
+    def is_empty(self):
+        if len(self.list)>=1:
+            return False
+        return True
+
+    def __sub__(self,other):
+        final_result=Ranges()
+        queue=deque(self.list)
+        
+        while queue:
+            item = queue.popleft()
+            #this could be optiomized more
+            for otheritem in other.list:
+                result=range_sub(item,otheritem)
+                if len(result)>1:
+                    queue.appendleft(result[1])
+                    item=result[0]
+                elif len(result)==1:
+                    item=result[0]
+                else:
+                    item=None
+                    break
+            #print item
+            if item !=None:
+                final_result.append(item)
+        return final_result
+
+    def append(self,myrange):
+        self.list.append(myrange)
+        self.upper=myrange[1]
+        if self.lower==None:
+            self.lower=myrange[0]
+
+    def __str__(self):
+        return(str(self.list))
 
 #Class to hold data. It's a dictionary of dictionaries.
 #tree[key of the extent]= {range1: [list of paired (snapshot,inode)],range2: [list of paired (snapshot,inode)]}
@@ -88,47 +184,119 @@ class TreeWrapper:
     def __init__(self):
         self._tree=dict()
         self._snapshots=[]
+        #self._inodes=dict()
     
-    #unfortunately some extents reappear, maybe there are dedup or reflink?
-    #right know they are completely ignored
         
     #check if the current tree has data for this extent/key.
     #if it has, check if the current extent range is already parsed.
-        
+    def delete_range(self,key,limit,tree,shallow):
+        snapshotinodelist=self._tree[key][limit]
+        #print(snapshotinodelist)
+        remove_snapshot_from_list(snapshotinodelist,tree,shallow)
+        #print(self._tree[key][limit])
+        if len(self._tree[key][limit])==0:
+            del self._tree[key][limit]
+
     #use array instead of list because integers consume too much memory in python
+    def add_range(self,key,limit,mypair):
+                  if key in self._tree.keys():
+                          if limit in self._tree[key].keys():
+                              self._tree[key][limit].append(mypair)
+                          else:
+                              self._tree[key][limit]=array.array('Q')
+                              self._tree[key][limit].append(mypair)
+                  else:
+                      self._tree[key]=dict()
+                      self._tree[key][limit]=array.array('Q')
+                      self._tree[key][limit].append(mypair)
+
+    #unfortunately some extents reappear, maybe there are dedup or reflink?
+    #so we need to take care of that by calculating exactly the data that each
+    #subvolume uses
     def add(self,tree,key,start,stop,inode):
                   mypair=unique_number(tree,inode)
                   if key in self._tree.keys():
-                      add=True
-                      ranges=sorted(self._tree[key].keys())
-                      for limit in ranges:
-                          if limit > stop:
-                              break
-                          #this code need to be reworked to cover when extents are adjucent
-                          #for the same snapshot
-                          if limit == start or limit == stop:
-                              #since snapshots are parsed linearly, check only if
-                              #the last data are from the same snapshot
-                              if compare_pair_to_snapshot(self._tree[key][limit][-1],tree):
-                                  add=False
-                                  break
-                      if add:
-                          if start in self._tree[key].keys():
-                              self._tree[key][start].append(mypair)
-                          else:
-                              self._tree[key][start]=array.array('Q')
-                              self._tree[key][start].append(mypair)
-                          if stop in self._tree[key].keys():
-                              self._tree[key][stop].append(mypair)
-                          else:
-                              self._tree[key][stop]=array.array('Q')
-                              self._tree[key][stop].append(mypair)
+                      extent=self._tree[key]
+                      #find all ranges that have data for this subvolume in this extent
+                      #do not search deep, since we add one subvolume at a time
+                      ranges=[]
+                      for myrange,snapshotinodelist in extent.items():
+                          if find_snapshot_in_list(snapshotinodelist,tree,True):
+                              ranges.append(myrange)
+                      ranges.sort()
+                      
+                      #start of intervals for this key and tree are in even positions
+                      #ends are in odd positions
+                      starts=ranges[::2]
+                      stops=ranges[1::2]
+                      if len(starts)!=len(stops):
+                          print("problem",key,ranges)
+                          sys.exit(0)
+                      
+                      #if the data we are trying to push already exist, ignore them
+                      if start in starts:
+                          index=starts.index(start)
+                          if stop == stops[index]:
+                              #print(ranges,start,stop)
+                              return
+                      
+                      #Algorithm: we have these intervals: 0...100, 150...200
+                      #and we want to add 80...170
+                      #the final result must be 0...200 because this extent is used
+                      #interely by this snapshot
+                      
+                      #For each base, calculate base - target. If the base
+                      #interval is modified then delete that end because new data will
+                      #be added. Then target becomes target-base and continue with the next base
+                      
+                      #try to minimize the subtractions needed
+                      realstart=bisect.bisect_left(starts,start)
+                      realstop=bisect.bisect_right(stops,stop)
+                      if realstart > 0:
+                          #print(realstart,starts,start)
+                          realstart-=1
+                      mystarts=starts[realstart:realstop+1]
+                      mystops=stops[realstart:realstop+1]
+                      if len(mystarts)>0:
+                          if mystops[-1]<start:
+                              mystarts=mystarts[:-1]
+                              mystops=mystops[:-1]
+                      if len(mystarts)>0:
+                          if mystarts[0]>stop:
+                              mystarts=mystarts[1:]
+                              
+                      #target is the interval we are trying to add
+                      target=Ranges(start,stop)
+                      for i, oldstart in enumerate(mystarts):
+                          #base is the interval that we must analyze
+                          base=Ranges(oldstart,mystops[i])
+                          newbase=base-target
+                          #if newbase differs in an end of base then that end must
+                          #be deleted because the end of the interval will be added
+                          if base.lower>target.lower and newbase.lower!=base.lower:
+                              self.delete_range(key,base.lower,tree,True)
+                          if base.upper<target.upper and newbase.upper!=base.upper:
+                              self.delete_range(key,base.upper,tree,True)
+                          
+                          #target must be modifed as well if the inrvals partially
+                          #exists already in base
+                          target-=base
+                          
+                          #if ti becomes empty it means that its data already exist
+                          if target.is_empty():
+                              return
+                      
+                      #if target survives, it means that its data are not overlaping
+                      #with existing bases so they must be added
+                      
+                      if target.lower==start:
+                          self.add_range(key,start,mypair)
+                      if target.upper==stop:
+                          self.add_range(key,stop,mypair)
                   else:
-                      self._tree[key]=dict()
-                      self._tree[key][start]=array.array('Q')
-                      self._tree[key][start].append(mypair)
-                      self._tree[key][stop]=array.array('Q')
-                      self._tree[key][stop].append(mypair)
+                      #this key does not exist already, easy case, just add it
+                      self.add_range(key,start,mypair)
+                      self.add_range(key,stop,mypair)
 
     #this function analyzes the tree after all data are added.
     #for each range find which subvolumes use that range.
@@ -136,8 +304,9 @@ class TreeWrapper:
     #we keep the snapshots only in the start part.
     #scenario before: extent1:  pos_1[tree1]..........pos_2[tree2]....pos_3[tree2]...pos_4[tree1]
     #final result: pos_1[tree1]..........pos_2[tree1,tree2]....pos_3[tree1]...pos_4[]
+    #the final range must become empty if additions were done correctly
     def transform(self):
-        list_of_extents=sorted(self._tree.keys())
+        list_of_extents=list(self._tree.keys())
         i=0
         while i < len(list_of_extents):
             extent=list_of_extents[i]
@@ -152,9 +321,9 @@ class TreeWrapper:
                 #again store the ressult in array, not list.
                 subvol_list=array.array('Q')
                 for subvol in result:
-                    data= return_coded(rangedict[myrange],subvol)
+                    data= return_coded(rangedict[myrange],subvol,False)
                     if data ==None:
-                        data=return_coded(rangedict[list_of_ranges[j-1]],subvol)
+                        data=return_coded(rangedict[list_of_ranges[j-1]],subvol,False)
                     if data ==None:
                         print("problem!",data,subvol)
                     subvol_list.append(data)
@@ -162,8 +331,9 @@ class TreeWrapper:
             self._tree[extent]=rangedict
             i+=1
 
+
     #return the sum of all data. It should be almost the same as the real data
-    #used by the filesystem excluding metadata
+    #used by the filesystem excluding metadata and without accounting raid level
     def __len__(self):
         result=0
         for extent,rangedict in self._tree.items():
@@ -248,20 +418,115 @@ class TreeWrapper:
                     results[snapshot]+=self.find_snapshots_size([snapshot],[current])
         return results
 
-#main function to parse data from disk and add the to the tree of extents
-def disk_parse(data_tree,fs,tree):
+#try to optimize parsing by piping, but to no avail
+            
+def disk_parse_pipe(pipe,path,tree):
           print("Parsing subvolume:",tree)
+          fs=btrfs.FileSystem(path)
           min_key=btrfs.ctree.Key(0,btrfs.ctree.EXTENT_DATA_KEY,0)
           for header, data in btrfs.ioctl.search_v2(fs.fd, tree,min_key):
             if header.type == btrfs.ctree.EXTENT_DATA_KEY:
               datum=btrfs.ctree.FileExtentItem(header,data)
               if datum.type != btrfs.ctree.FILE_EXTENT_INLINE:# and datum.disk_bytenr !=0:
-                  key=(datum.disk_bytenr,datum.disk_num_bytes)
+                  key=unique_number(datum.disk_bytenr,datum.disk_num_bytes)
+                  #key = pool.apply(unique_number, (datum.disk_bytenr,datum.disk_num_bytes,))
                   stop=datum.offset+datum.num_bytes
-                  data_tree.add(tree,key,datum.offset,stop,datum.key.objectid)
-                  
+                  #key=res.get()
+                  pipe.send((key,datum.offset,stop,datum.key.objectid))
+          pipe.send(None)
+          pipe.close()
+          os.close(fs.fd)
+          del fs
+
+
+
+def pipe_add(data_tree,path,tree,analyze_files):
+    parent_conn, child_conn = multiprocessing.Pipe(False)
+    p = multiprocessing.Process(target=disk_parse_pipe, args=(child_conn,path,tree,))
+    p.start()
+    while True:
+        res=parent_conn.recv()
+        if res !=None:
+              if analyze_files:
+                  data_tree.add(tree,res[0],res[1],res[2],res[3])
+              else:
+                  data_tree.add(tree,res[0],res[1],res[2],0)
+        else:
+            break
+    p.join()
+
+
+#try to optimize parsing by using multiprocessing
+
+
+#return the data to add for this extent
+#unfortunately we have to open each time the filesystem and reparse partially the
+#data
+def actual_extent_parsing(item):
+              header,path,tree=item
+              result=None
+              fs=btrfs.FileSystem(path)
+              key=btrfs.ctree.Key(header.objectid,btrfs.ctree.EXTENT_DATA_KEY,header.offset)
+              for header,data in btrfs.ioctl.search_v2(fs.fd, tree,key,nr_items=1):
+                  datum=btrfs.ctree.FileExtentItem(header,data)
+                  if datum.type != btrfs.ctree.FILE_EXTENT_INLINE:# and datum.disk_bytenr !=0:
+                      key=unique_number(datum.disk_bytenr,datum.disk_num_bytes)
+                      stop=datum.offset+datum.num_bytes
+                      result = (key,datum.offset,stop,datum.key.objectid)
+              os.close(fs.fd)
+              del fs
+              return result
+
+
+#main function to parse data from disk, generate 'interesting' extents
+def generate_extents(path,tree):
+          #print("Parsing subvolume:",tree,path)
+          #pool = multiprocessing.Pool(processes=1)
+          fs=btrfs.FileSystem(path)
+          min_key=btrfs.ctree.Key(0,btrfs.ctree.EXTENT_DATA_KEY,0)
+          for header, _ in btrfs.ioctl.search_v2(fs.fd, tree,min_key):
+            if header.type == btrfs.ctree.EXTENT_DATA_KEY:
+              yield header,path,tree
+          os.close(fs.fd)
+          del fs
+          raise StopIteration
+
+
+#parallelize parsing, return the data without order what is the best value for chunk size?
+def disk_parse_parallel(pool,data_tree,path,tree,analyze_files):
+          print("Parsing subvolume:",tree)
+          #pool = multiprocessing.Pool(processes=4)
+          #fs=btrfs.FileSystem(path)
+          for res in pool.imap_unordered(actual_extent_parsing, generate_extents(path,tree),128):
+            #print(res)
+            if res!=None:
+              if analyze_files:
+                  data_tree.add(tree,res[0],res[1],res[2],res[3])
+              else:
+                  data_tree.add(tree,res[0],res[1],res[2],0)
+
+
+
+#main function to parse data from disk and add the to the tree of extents, sequentially
+def disk_parse(data_tree,fs,tree,analyze_files):
+          print("Parsing subvolume:",tree)
+          #pool = multiprocessing.Pool(processes=1)
+          min_key=btrfs.ctree.Key(0,btrfs.ctree.EXTENT_DATA_KEY,0)
+          for header, data in btrfs.ioctl.search_v2(fs.fd, tree,min_key):
+            if header.type == btrfs.ctree.EXTENT_DATA_KEY:
+              datum=btrfs.ctree.FileExtentItem(header,data)
+              if datum.type != btrfs.ctree.FILE_EXTENT_INLINE:# and datum.disk_bytenr !=0:
+                  key=unique_number(datum.disk_bytenr,datum.disk_num_bytes)
+                  #key = pool.apply(unique_number, (datum.disk_bytenr,datum.disk_num_bytes,))
+                  stop=datum.offset+datum.num_bytes
+                  #key=res.get()
+                  if analyze_files:
+                      data_tree.add(tree,key,datum.offset,stop,datum.key.objectid)
+                  else:
+                      data_tree.add(tree,key,datum.offset,stop,0)
 
 def main():
+    multiprocessing.set_start_method('spawn')
     parser = argparse.ArgumentParser()
     parser.add_argument("-u","--unique",action='store_true',help="calculate only unique data, -r argument makes no sense if -u is active")
     parser.add_argument("-f","--files",action='store_true',help="find filenames that exist in unique extents")
@@ -315,14 +580,16 @@ def main():
     
     #parse the trees from newer to older
     parse_trees=list(reversed(parse_trees))
+    pool = multiprocessing.Pool(processes=4)
     print("Subvolumes to parse:",parse_trees)
     for tree in parse_trees:
-        disk_parse(data_tree,fs,tree)
+        #disk_parse(data_tree,fs,tree,args.files)
+        disk_parse_parallel(pool,data_tree,args.path,tree,args.files)
+        #pipe_add(data_tree,args.path,tree,args.files)
+    pool.close()
+    pool.join()
 
     data_tree.transform()
-    #print(unique_number.cache_info())
-    #print(unique_to_pair.cache_info())
-    #print(compare_pair_to_snapshot.cache_info())
     unique_sum=0
     unique_data,files=data_tree.find_unique(fs,args.files)
     #if unique analysis is only needed, do not calculate differences 
@@ -340,7 +607,8 @@ def main():
         print("{:>10} {:>10}            {:>10}             {:>10}".format(snapshot,btrfs.utils.pretty_size(unique_data[snapshot]),btrfs.utils.pretty_size(previous_data[snapshot]),btrfs.utils.pretty_size(current_data[snapshot])))
         #print(files[snapshot])
         unique_sum+=unique_data[snapshot]
-    print("Size/Cost of subvolumes:",btrfs.utils.pretty_size(unique_sum),"Volatility:","{:.2%}".format(unique_sum/len(data_tree)))
+    total_data=len(data_tree)
+    print("Unique Data size of subvolumes:",btrfs.utils.pretty_size(unique_sum),"Total size:",btrfs.utils.pretty_size(total_data),"Volatility:","{:.2%}".format(unique_sum/total_data))
     if args.files:
         print()
         print("Possible Unique Files:")
