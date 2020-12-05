@@ -1,5 +1,5 @@
 # btrfs-snapshot-diff
-Find the differences between btrfs snapshots
+Find the differences between btrfs snapshots, no quota activation in btrfs needed!
 
 Btrfs, as a CoW filesystem, has a problem identifying the size of a snapshot and the differences between snapshots.
 By using [python-btrfs](https://github.com/knorrie/python-btrfs), it is possible to parse the metadata of a btrfs filesystem and find the differences between subvolumes/snapshots.
