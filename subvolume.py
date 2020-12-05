@@ -489,7 +489,7 @@ def generate_extents(path,tree):
               yield header,path,tree
           os.close(fs.fd)
           del fs
-          raise StopIteration
+          return
 
 
 #parallelize parsing, return the data without order what is the best value for chunk size?
